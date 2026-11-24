@@ -13,11 +13,11 @@ pub mod locate;
 
 use std::collections::{HashMap, HashSet};
 
-use data::{Layer, MapData, LAYERS, MAP_IDS, pretty};
+use data::{Effect, Layer, MapData, LAYERS, MAP_IDS, pretty};
 use rune::tok::TextStyle;
 use rune::{
-    AppSpec, Color, Cx, Drag, El, Image, ImageCache, Key, KeyEvent, LineCap, MagnifyEvent, Phase, PointerEvent, ScrollSpec, Shape, Tx, Waker,
-    WheelEvent, col, el, row, text,
+    AppSpec, Color, Cx, Drag, El, Image, ImageCache, Key, KeyEvent, LineCap, MagnifyEvent, Phase, PointerEvent, ScrollSpec, Shape, TextEdit,
+    Tx, Waker, WheelEvent, col, el, row, text, text_input,
 };
 
 // ------------------------------------------------------------------ palette
@@ -86,8 +86,13 @@ pub struct State {
     hover: Option<usize>,
     pointer: Option<[f32; 2]>,
     drag_from: [f32; 2],
-    /// How many requested tiles had decoded at the last poll: a change re-runs the view.
+    /// How many requested tiles and icons had decoded at the last poll: a change re-runs the view.
     ready_tiles: usize,
+    /// Classes that have an icon file, and the icons requested so far.
+    icon_set: HashSet<String>,
+    icons: HashMap<String, Image>,
+    effects: Vec<Effect>,
+    pub search: TextEdit,
     pub player: Option<Player>,
     /// One line at the bottom: locate results and errors.
     pub status: String,
@@ -106,7 +111,7 @@ impl State {
             cur: 0,
             cams: vec![None; n],
             vp: [1280.0, 800.0],
-            layers: [Layer::HomeCave, Layer::WayStone, Layer::Locations, Layer::Caves].into_iter().collect(),
+            layers: [Layer::HomeCave, Layer::WayStone, Layer::Locations, Layer::Areas, Layer::Water, Layer::Caves].into_iter().collect(),
             items: HashSet::new(),
             expanded: HashSet::new(),
             panel: true,
@@ -117,6 +122,10 @@ impl State {
             pointer: None,
             drag_from: [0.0, 0.0],
             ready_tiles: 0,
+            icon_set: data::icon_classes().into_iter().collect(),
+            icons: HashMap::new(),
+            effects: data::effects(),
+            search: TextEdit::new(""),
             player: None,
             status: String::new(),
             locate: None,
@@ -225,11 +234,28 @@ impl State {
                 self.tiles.insert(k, img);
             }
         }
+        self.ensure_icons();
         if self.tiles.len() > 400 {
             let keep: HashSet<TileKey> = want.iter().map(|&(x, y)| (cur, z, x, y)).collect();
             self.tiles.retain(|k, _| k.1 == 0 || keep.contains(k));
         }
     }
+
+    /// Request icons for whatever markers are switched on.
+    fn ensure_icons(&mut self) {
+        let Some(cache) = self.images.as_ref() else { return };
+        let mut want: Vec<&str> = self.items.iter().map(String::as_str).collect();
+        if self.layers.contains(&Layer::HomeCave) { want.push("HomeCave"); }
+        if self.layers.contains(&Layer::WayStone) { want.push("WayStone"); }
+        for c in want {
+            if self.icon_set.contains(c) && !self.icons.contains_key(c) {
+                let img = cache.file(format!("{}/icons/{c}.png", self.assets), 0.0, 1.0);
+                self.icons.insert(c.to_string(), img);
+            }
+        }
+    }
+
+    fn icon(&self, class: &str) -> Option<&Image> { self.icons.get(class).filter(|i| i.is_ready() && i.error().is_none()) }
 
     pub fn item_visible(&self, it: &data::Item) -> bool {
         match it.layer {
@@ -245,7 +271,7 @@ impl State {
             if it.f.kind != "pt" || !self.item_visible(it) { continue; }
             let s = self.to_screen(cam, it.at);
             let d = (s[0] - q[0]).powi(2) + (s[1] - q[1]).powi(2);
-            let r = if it.layer == Layer::Item { 8.0 } else { 12.0 };
+            let r = (marker_size(it, cam) * 0.55).max(if it.layer == Layer::Item { 8.0 } else { 12.0 });
             if d < r * r && best.map(|b| d < b.0).unwrap_or(true) { best = Some((d, i)); }
         }
         best.map(|b| b.1)
@@ -279,15 +305,17 @@ pub fn setup(s: &mut State, waker: Waker) {
 pub fn poll(s: &mut State, _clock: f64, _tx: &mut Tx) -> bool {
     s.ensure_tiles();
     // Tiles decode in the background; redraw when one lands, not only when one is requested.
-    let ready = s.tiles.values().filter(|t| t.is_ready()).count();
+    let ready = s.tiles.values().chain(s.icons.values()).filter(|t| t.is_ready()).count();
     let changed = ready != s.ready_tiles;
     s.ready_tiles = ready;
     changed
 }
 
-pub fn on_key(s: &mut State, e: &KeyEvent, _tx: &mut Tx) -> bool {
+pub fn on_key(s: &mut State, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if s.search.focused { return false; } // typing in the search box
     let q = [s.vp[0] / 2.0, s.vp[1] / 2.0];
     match &e.key {
+        Key::Text(t) if t == "/" => tx.focus("search", false),
         Key::Text(t) if t == "+" || t == "=" => s.zoom_about(q, 1.4),
         Key::Text(t) if t == "-" || t == "_" => s.zoom_about(q, 1.0 / 1.4),
         Key::Text(t) if t == "1" => s.select_map(0),
@@ -335,6 +363,7 @@ pub fn view(s: &State, _cx: &mut Cx<State>) -> El {
     let map = map_canvas(s);
     let mut root = el().key("root").w_full().h_full().fill(BG).child(map).child(top_bar(s));
     if s.panel { root = root.child(side_panel(s)); }
+    if let Some(r) = search_results(s) { root = root.child(r); }
     root.child(status_bar(s))
 }
 
@@ -361,14 +390,9 @@ fn map_canvas(s: &State) -> El {
         })
         .on_wheel(|s: &mut State, e: WheelEvent, tx| {
             tx.instant();
-            if e.precise && !e.mods.ctrl {
-                // Trackpad: two-finger scroll pans.
-                let cam = s.cam();
-                s.set_cam(Cam { c: [cam.c[0] + e.dx / cam.zoom, cam.c[1] + e.dy / cam.zoom], zoom: cam.zoom });
-            } else {
-                let f = (-e.dy * 0.004).exp().clamp(0.5, 2.0);
-                s.zoom_about([e.x, e.y], f);
-            }
+            // Scroll always zooms, toward the pointer (dragging pans).
+            let f = (-e.dy * 0.0035).exp().clamp(0.5, 2.0);
+            s.zoom_about([e.x, e.y], f);
             true
         })
         .on_magnify(|s: &mut State, e: MagnifyEvent, tx| {
@@ -419,6 +443,7 @@ fn map_canvas(s: &State) -> El {
     if z > 0 { for &(x, y) in &want { canvas = draw_tile(canvas, z, x, y); } }
 
     canvas = canvas.child(el().key("vectors").absolute(0.0, 0.0).size(s.vp[0], s.vp[1]).shape(vectors(s, cam)));
+    for mk in markers(s, cam) { canvas = canvas.child(mk); }
     for label in labels(s, cam) { canvas = canvas.child(label); }
     if let Some(tip) = tooltip(s) { canvas = canvas.child(tip); }
     canvas
@@ -440,12 +465,10 @@ fn vectors(s: &State, cam: Cam) -> Shape {
     let on_screen = |p: [f32; 2], pad: f32| p[0] > -pad && p[1] > -pad && p[0] < w + pad && p[1] < h + pad;
     let mut shape = Shape::new();
 
-    // Areas, water, caves, cliffs.
+    // Cave and cliff lines. Area and water outlines are never drawn, only their names.
     for it in &m.items {
         if !s.item_visible(it) { continue; }
         let (color, width) = match it.layer {
-            Layer::Areas => (srgba(1.0, 0.95, 0.8, 0.35), 1.0),
-            Layer::Water => (srgba(0.45, 0.78, 1.0, 0.4), 1.0),
             Layer::Caves => (srgba(1.0, 0.62, 0.3, 0.9), (0.9 * ppu).clamp(1.5, 4.0)),
             Layer::Cliffs => (srgba(0.85, 0.85, 0.85, 0.7), 1.5),
             _ => continue,
@@ -473,8 +496,10 @@ fn vectors(s: &State, cam: Cam) -> Shape {
     // Item dots: one octagon each, darker rim for contrast on any terrain.
     let dot = (2.2 + cam.zoom * 3.0).clamp(3.0, 6.0);
     let oct = |c: [f32; 2], r: f32| -> Vec<[f32; 2]> { ellipse(c, [r, r], 22.5, 8) };
+    let icons = icons_fit(s, cam);
     for it in &m.items {
         if it.layer != Layer::Item || it.f.kind != "pt" || !s.items.contains(&it.f.class) { continue; }
+        if icons && s.icon(&it.f.class).is_some() { continue; }
         let c = s.to_screen(cam, it.at);
         if !on_screen(c, 10.0) { continue; }
         shape = shape.fill(oct(c, dot + 1.2), OUTLINE).fill(oct(c, dot), cat_color(it.cat));
@@ -483,6 +508,7 @@ fn vectors(s: &State, cam: Cam) -> Shape {
     // Home caves (square) and waystones (diamond) on top.
     for it in &m.items {
         if !matches!(it.layer, Layer::HomeCave | Layer::WayStone) || !s.item_visible(it) { continue; }
+        if s.icon(&it.f.class).is_some() { continue; }
         let c = s.to_screen(cam, it.at);
         if !on_screen(c, 20.0) { continue; }
         let (r, fill, rot) = match it.layer {
@@ -504,6 +530,46 @@ fn vectors(s: &State, cam: Cam) -> Shape {
     shape
 }
 
+/// Most markers drawn as icons at once; past this many on screen, items fall back to dots.
+const MAX_ICONS: usize = 900;
+
+/// Icon size on screen: items grow a little as you zoom in, caves and waystones stay large.
+fn marker_size(it: &data::Item, cam: Cam) -> f32 {
+    match it.layer {
+        Layer::HomeCave | Layer::WayStone => 26.0,
+        _ => (12.0 + cam.zoom * 18.0).clamp(15.0, 28.0),
+    }
+}
+
+fn on_view(s: &State, p: [f32; 2], pad: f32) -> bool { p[0] > -pad && p[1] > -pad && p[0] < s.vp[0] + pad && p[1] < s.vp[1] + pad }
+
+/// Few enough item markers on screen to draw them all as icons.
+fn icons_fit(s: &State, cam: Cam) -> bool {
+    let m = s.map();
+    m.items.iter().filter(|it| it.layer == Layer::Item && it.f.kind == "pt" && s.items.contains(&it.f.class) && on_view(s, s.to_screen(cam, it.at), 16.0))
+        .take(MAX_ICONS + 1).count() <= MAX_ICONS
+}
+
+/// Icon markers (Vulnona's emoji set): items first, then home caves and waystones on top.
+fn markers(s: &State, cam: Cam) -> Vec<El> {
+    let m = s.map();
+    let items = icons_fit(s, cam);
+    let mut out = Vec::new();
+    for pass in 0..2 {
+        for (i, it) in m.items.iter().enumerate() {
+            let top = matches!(it.layer, Layer::HomeCave | Layer::WayStone);
+            if it.f.kind != "pt" || top != (pass == 1) || !s.item_visible(it) { continue; }
+            if !top && !items { continue; }
+            let Some(img) = s.icon(&it.f.class) else { continue };
+            let c = s.to_screen(cam, it.at);
+            let sz = marker_size(it, cam);
+            if !on_view(s, c, sz) { continue; }
+            out.push(el().key(format!("m{i}")).absolute(c[0] - sz / 2.0, c[1] - sz / 2.0).size(sz, sz).pixels(img.pixels()));
+        }
+    }
+    out
+}
+
 fn labels(s: &State, cam: Cam) -> Vec<El> {
     let m = s.map();
     let span = m.image.w as f32 * cam.zoom; // how wide the whole map is on screen
@@ -511,8 +577,8 @@ fn labels(s: &State, cam: Cam) -> Vec<El> {
     for (i, it) in m.items.iter().enumerate() {
         if !s.item_visible(it) { continue; }
         let (st, color, min_span) = match (it.f.kind.as_str(), it.layer) {
-            ("txt", Layer::Areas) => (style(12.5, 650.0), rgb(0xfff4dc), 700.0),
-            ("txt", Layer::Water) => (style(11.0, 500.0), rgb(0x9fd8ff), 2200.0),
+            ("txt", Layer::Areas) => (style(12.5, 650.0), rgb(0xfff4dc), 300.0),
+            ("txt", Layer::Water) => (style(11.0, 500.0), rgb(0x9fd8ff), 1100.0),
             ("txt", Layer::Locations) => (style(11.0, 600.0), rgb(0xffd77a), 1800.0),
             ("txt", _) => (style(11.0, 500.0), INK, 2200.0),
             ("pt", Layer::HomeCave | Layer::WayStone) if !it.f.name.is_empty() => (style(11.0, 600.0), INK, 1400.0),
@@ -523,7 +589,7 @@ fn labels(s: &State, cam: Cam) -> Vec<El> {
         if c[0] < -100.0 || c[1] < -40.0 || c[0] > s.vp[0] + 100.0 || c[1] > s.vp[1] + 40.0 { continue; }
         let is_point = it.f.kind == "pt";
         let name = if is_point { it.f.name.clone() } else { it.f.name.replace('★', "").trim().to_string() };
-        let y = if is_point { c[1] + 11.0 } else { c[1] - 9.0 };
+        let y = if is_point { c[1] + 14.0 } else { c[1] - 9.0 };
         out.push(
             el().key(format!("l{i}")).absolute(c[0] - 110.0, y).w(220.0).center()
                 .child(el().px(4.0).radius(4.0).fill(srgba(0.0, 0.0, 0.0, 0.45)).child(text(name).font(st).color(color))),
@@ -572,6 +638,7 @@ fn top_bar(s: &State) -> El {
     for (i, m) in s.maps.iter().enumerate() {
         bar = bar.child(button(format!("map{i}"), &m.id, i == s.cur, move |s: &mut State| s.select_map(i)));
     }
+    bar = bar.child(search_box(s));
     bar = bar
         .child(button("zin".into(), "+", false, |s: &mut State| { let q = [s.vp[0] / 2.0, s.vp[1] / 2.0]; s.zoom_about(q, 1.5) }))
         .child(button("zout".into(), "−", false, |s: &mut State| { let q = [s.vp[0] / 2.0, s.vp[1] / 2.0]; s.zoom_about(q, 1.0 / 1.5) }))
@@ -667,4 +734,144 @@ fn status_bar(s: &State) -> El {
         .child(el().grow(1.0))
         .child(row().h(28.0).px(10.0).align(rune::Align::Center).radius(6.0).fill(PANEL).border(1.0, PANEL_EDGE)
             .child(text(parts.join("   ·   ")).font(style(12.0, 500.0)).color(INK).single_line()))
+}
+
+// ------------------------------------------------------------------ search
+
+/// What a search result does when picked.
+#[derive(Clone)]
+enum Hit {
+    /// Show an item type (Vulnona class) on the map.
+    Type(String),
+    /// Fly to a named place (index into the map's items).
+    Place(usize),
+    /// A food or fish from effects.json: show its markers and say what it does.
+    Effect(usize),
+}
+
+struct Found { hit: Hit, title: String, sub: String, rank: u8 }
+
+fn search_hits(s: &State) -> Vec<Found> {
+    let q = s.search.text.trim().to_lowercase();
+    if q.is_empty() { return Vec::new(); }
+    let m = s.map();
+    let rank = |title: &str, rest: &str| -> Option<u8> {
+        let t = title.to_lowercase();
+        if t.starts_with(&q) { Some(0) } else if t.contains(&q) { Some(1) } else if rest.to_lowercase().contains(&q) { Some(2) } else { None }
+    };
+    let mut out = Vec::new();
+    for (i, e) in s.effects.iter().enumerate() {
+        let sub = if e.r#where.is_empty() { format!("{} · {}", e.kind, e.effect) } else { format!("{} · {} · {}", e.kind, e.effect, e.r#where) };
+        if let Some(r) = rank(&e.name, &format!("{} {}", e.kind, e.effect)) { out.push(Found { hit: Hit::Effect(i), title: e.name.clone(), sub, rank: r }); }
+    }
+    for cat in &m.categories {
+        for (class, n) in &cat.types {
+            let name = pretty(class);
+            let fx = s.effects.iter().find(|e| e.kind != "Fish" && e.classes.contains(class)).map(|e| e.effect.clone());
+            let rest = format!("{class} {} {}", cat.name, fx.clone().unwrap_or_default());
+            let Some(r) = rank(&name, &rest) else { continue };
+            let mut sub = format!("{} · {n} on {}", cat.name, m.id);
+            if let Some(f) = fx { sub = format!("{sub} · {f}"); }
+            out.push(Found { hit: Hit::Type(class.clone()), title: name, sub, rank: r });
+        }
+    }
+    let mut seen = HashSet::new();
+    for (i, it) in m.items.iter().enumerate() {
+        let name = it.f.name.replace('★', "").trim().to_string();
+        if name.is_empty() || !matches!(it.layer, Layer::HomeCave | Layer::WayStone | Layer::Areas | Layer::Locations | Layer::Water | Layer::Caves) { continue; }
+        let kind = match it.layer {
+            Layer::HomeCave => if it.underwater { "Home cave (underwater)" } else { "Home cave" },
+            Layer::WayStone => if it.underwater { "Waystone (underwater)" } else { "Waystone" },
+            Layer::Areas => "Area",
+            Layer::Locations => "Location",
+            Layer::Water => "Water",
+            _ => "Cave",
+        };
+        let Some(r) = rank(&name, kind) else { continue };
+        if !seen.insert((name.clone(), kind)) { continue; }
+        out.push(Found { hit: Hit::Place(i), title: name, sub: format!("{kind} · {}", m.id), rank: r });
+    }
+    out.sort_by_key(|f| f.rank);
+    out.truncate(9);
+    out
+}
+
+fn pick_hit(s: &mut State, hit: &Hit, tx: &mut Tx) {
+    match hit {
+        Hit::Type(class) => {
+            s.items.insert(class.clone());
+            let n = s.map().items.iter().filter(|it| &it.f.class == class).count();
+            s.status = format!("Showing {n} {}", pretty(class));
+        }
+        Hit::Place(i) => {
+            let (at, layer) = { let it = &s.map().items[*i]; (it.at, it.layer) };
+            s.layers.insert(layer);
+            let zoom = s.cam().zoom.max(0.3);
+            s.set_cam(Cam { c: at, zoom });
+            s.status.clear();
+        }
+        Hit::Effect(i) => {
+            let e = s.effects[*i].clone();
+            let here: Vec<String> = e.classes.iter()
+                .filter(|c| s.map().categories.iter().any(|cat| cat.types.iter().any(|t| &t.0 == *c)))
+                .cloned().collect();
+            for c in &here { s.items.insert(c.clone()); }
+            let mut msg = format!("{}: {}", e.name, e.effect);
+            if e.kind == "Fish" { msg.push_str(" · fish swim around, so the markers are fishing spots"); }
+            if here.is_empty() { msg.push_str(&format!(" · not marked on {}", s.map().id)); }
+            s.status = msg;
+        }
+    }
+    s.search.clear();
+    tx.blur();
+    s.ensure_tiles();
+}
+
+fn search_box(s: &State) -> El {
+    let field = text_input(&s.search, style(12.5, 500.0)).key("search").single_line().grow(1.0)
+        .color(INK).placeholder("Search items, places, buffs  ( / )", INK_DIM)
+        .on_edit(|s: &mut State| &mut s.search)
+        .on_input_key(|s: &mut State, ev: &KeyEvent, tx: &mut Tx| {
+            if ev.key == Key::Escape { s.search.clear(); tx.blur(); return true; }
+            false
+        })
+        .on_submit(|s: &mut State, tx: &mut Tx| {
+            if let Some(f) = search_hits(s).into_iter().next() { pick_hit(s, &f.hit, tx); }
+        });
+    row().key("search-box").w(250.0).h(28.0).px(8.0).gap(6.0).align(rune::Align::Center).radius(6.0)
+        .fill(srgba(1.0, 1.0, 1.0, 0.06)).border(1.0, if s.search.focused { ACCENT.alpha(0.6) } else { PANEL_EDGE })
+        .child(text("⌕").font(style(13.0, 600.0)).color(INK_DIM))
+        .child(field)
+}
+
+fn search_results(s: &State) -> Option<El> {
+    if s.search.text.trim().is_empty() { return None; }
+    let found = search_hits(s);
+    let left = if s.panel { 272.0 } else { 12.0 };
+    let mut list = col().key("results").absolute(left, 58.0).w(420.0).padding(6.0).gap(2.0).radius(8.0).fill(PANEL).border(1.0, PANEL_EDGE);
+    if found.is_empty() {
+        list = list.child(el().px(8.0).h(30.0).child(text("Nothing on this map matches").font(style(12.5, 500.0)).color(INK_DIM)));
+    }
+    for (n, f) in found.into_iter().enumerate() {
+        let hit = f.hit.clone();
+        let icon_class = match &f.hit {
+            Hit::Type(c) => Some(c.clone()),
+            Hit::Effect(i) => s.effects[*i].classes.first().cloned(),
+            Hit::Place(i) => Some(s.map().items[*i].f.class.clone()),
+        };
+        let icon = match icon_class.as_deref().and_then(|c| s.icon(c)) {
+            Some(img) => el().size(20.0, 20.0).pixels(img.pixels()),
+            None => el().size(20.0, 20.0),
+        };
+        list = list.child(
+            row().key(format!("hit{n}")).w_full().px(8.0).py(5.0).gap(10.0).radius(6.0).align(rune::Align::Center)
+                .fill(if n == 0 { srgba(1.0, 1.0, 1.0, 0.06) } else { Color::TRANSPARENT }).hover(HOVER)
+                .on_press_tx(move |s: &mut State, tx: &mut Tx| pick_hit(s, &hit, tx))
+                .child(icon)
+                .child(col().grow(1.0).gap(1.0)
+                    .child(text(f.title).font(style(12.5, 600.0)).color(INK).single_line())
+                    .child(text(f.sub).font(style(11.0, 500.0)).color(INK_DIM).wrap())),
+        );
+    }
+    Some(list)
 }

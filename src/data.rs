@@ -13,6 +13,30 @@ fn embedded(id: &str) -> &'static str {
     }
 }
 
+/// Classes with a marker icon at assets/icons/<Class>.png (made by `datagen --icons`).
+pub fn icon_classes() -> Vec<String> {
+    serde_json::from_str(include_str!("../assets/icons/index.json")).unwrap_or_default()
+}
+
+/// A food or fish and what eating it does (assets/effects.json, from the community wiki).
+#[derive(Deserialize, Clone)]
+pub struct Effect {
+    pub name: String,
+    pub kind: String,
+    pub effect: String,
+    #[serde(default)]
+    pub r#where: String,
+    /// Map marker classes that show where to find it.
+    #[serde(default)]
+    pub classes: Vec<String>,
+}
+
+pub fn effects() -> Vec<Effect> {
+    #[derive(Deserialize)]
+    struct Doc { entries: Vec<Effect> }
+    serde_json::from_str::<Doc>(include_str!("../assets/effects.json")).map(|d| d.entries).unwrap_or_default()
+}
+
 #[derive(Deserialize)]
 pub struct ImageInfo {
     pub w: u32,
@@ -72,8 +96,8 @@ pub const LAYERS: [(Layer, &str); 7] = [
     (Layer::HomeCave, "Home caves"),
     (Layer::WayStone, "Waystones"),
     (Layer::Locations, "Locations"),
-    (Layer::Areas, "Areas"),
-    (Layer::Water, "Water"),
+    (Layer::Areas, "Area names"),
+    (Layer::Water, "Water names"),
     (Layer::Caves, "Caves"),
     (Layer::Cliffs, "Cliffs"),
 ];

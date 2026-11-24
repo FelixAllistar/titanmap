@@ -10,7 +10,9 @@
 //!
 //! cargo run --release -p datagen [-- Gondwa Riparia ...]
 
-use std::collections::BTreeMap;
+mod icons;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +30,9 @@ fn main() {
     let out = root.join("assets/maps");
     let wanted: Vec<String> = std::env::args().skip(1).collect();
     let skip_tiles = wanted.iter().any(|a| a == "--no-tiles");
+    let icons_only = wanted.iter().any(|a| a == "--icons");
     let wanted: Vec<String> = wanted.into_iter().filter(|a| !a.starts_with("--")).collect();
+    if icons_only { build_icons(&root, &cache, &out); return; }
 
     let dat = get_text(&format!("{BASE}/dat.txt"));
     fs::create_dir_all(&cache).unwrap();
@@ -75,6 +79,20 @@ fn main() {
         fs::write(map_out.join("map.json"), serde_json::to_string(&doc).unwrap()).unwrap();
     }
     fs::write(out.join("index.json"), serde_json::to_string_pretty(&index).unwrap()).unwrap();
+    build_icons(&root, &cache, &out);
+}
+
+/// Icons for every point class any map uses.
+fn build_icons(root: &Path, cache: &Path, out: &Path) {
+    let mut classes = BTreeSet::new();
+    for id in MAPS {
+        let Ok(doc) = fs::read_to_string(out.join(id).join("map.json")) else { continue };
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        for f in v["features"].as_array().into_iter().flatten() {
+            if f["kind"] == "pt" { if let Some(c) = f["class"].as_str() { classes.insert(c.to_string()); } }
+        }
+    }
+    icons::build(root, cache, &classes);
 }
 
 // ---------------------------------------------------------------- fetching

@@ -1,0 +1,23 @@
+{
+  "source": "Path of Titans community wiki (path-of-titans.fandom.com, CC BY-SA). Fish swim around, so they have no fixed map spots; 'classes' are the map markers to show for each entry.",
+  "entries": [
+    { "name": "Arapaima", "kind": "Fish", "effect": "Bleed Heal+, Health Heal+", "where": "Freshwater lakes and rivers (Panjura, Gondwa); one of the largest fish", "classes": ["Fish"] },
+    { "name": "Trout", "kind": "Fish", "effect": "Bleed Heal+", "where": "Seen at Azure Shore", "classes": ["Fish"] },
+    { "name": "Kelp Shark", "kind": "Fish", "effect": "Bleed Heal+", "where": "Rare; waters around Golden Plateau (Gondwa) with manta rays and tuna", "classes": ["Fish"] },
+    { "name": "Catfish", "kind": "Fish", "effect": "Health Heal+", "where": "", "classes": ["Fish"] },
+    { "name": "River Stingray", "kind": "Fish", "effect": "Venom Heal+", "where": "Seen at Ocean Stacks", "classes": ["Fish"] },
+    { "name": "Pike", "kind": "Fish", "effect": "Stamina Regen+ (10 min)", "where": "Freshwater, sometimes salt water", "classes": ["Fish"] },
+    { "name": "Tuna", "kind": "Fish", "effect": "Stamina Regen+", "where": "Ocean (Azure Shore, Golden Plateau)", "classes": ["Fish"] },
+    { "name": "Manta Ray", "kind": "Fish", "effect": "Swim Speed+ (1 min 30 s)", "where": "Ocean (Azure Shore)", "classes": ["Fish"] },
+    { "name": "Green Turtle", "kind": "Fish", "effect": "Armor+", "where": "Ocean", "classes": ["Turtle", "Fish"] },
+    { "name": "Basilemys", "kind": "Fish", "effect": "Armor+", "where": "", "classes": ["Turtle", "Fish"] },
+    { "name": "Bluegill", "kind": "Fish", "effect": "No buff", "where": "", "classes": ["Fish"] },
+    { "name": "Arowana", "kind": "Fish", "effect": "No buff", "where": "", "classes": ["Fish"] },
+    { "name": "Mushrooms", "kind": "Food", "effect": "Healing+ (faster health regen)", "where": "", "classes": ["Amanita", "Armillaria", "Button", "MilkCap", "Russula", "Chanterelle", "CaveMush", "ShelfMush"] },
+    { "name": "Roots", "kind": "Food", "effect": "Water+ (fills some thirst)", "where": "", "classes": ["Roots"] },
+    { "name": "Melons", "kind": "Food", "effect": "Water+ (fills some thirst)", "where": "Swampy areas", "classes": ["Melon"] },
+    { "name": "Salt Rocks", "kind": "Food", "effect": "Thirst (drains water fast); cleans dirty water when dropped in it", "where": "", "classes": ["SaltRock"] },
+    { "name": "Death Caps", "kind": "Quest", "effect": "Poisonous, not edible; used in disposal quests", "where": "", "classes": ["DeathCap"] },
+    { "name": "Glow Mushrooms", "kind": "Quest", "effect": "Replenishes waystones", "where": "Near waystones", "classes": ["GlowMush"] }
+  ]
+}

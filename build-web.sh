@@ -31,5 +31,8 @@ for d in assets/maps/*/; do
     rm -rf "$out/assets/maps/$id/tiles"
     cp -r "$d/tiles" "$out/assets/maps/$id/tiles"
 done
+# Marker icons (made by `cargo run -p datagen -- --icons`).
+rm -rf "$out/assets/icons"
+cp -r assets/icons "$out/assets/icons"
 [[ -n $shim ]] && rm -rf "$shim"
 echo "built $out — serve it with: python -m http.server 8000 -d $out"
