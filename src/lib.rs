@@ -636,6 +636,10 @@ fn status_bar(s: &State) -> El {
     }
     if !s.status.is_empty() { parts.push(s.status.clone()); }
     if parts.is_empty() { return el().key("status"); }
-    el().key("status").pin(None, None, Some(12.0), Some(12.0)).px(10.0).py(5.0).radius(6.0).fill(PANEL).border(1.0, PANEL_EDGE)
-        .child(text(parts.join("   ·   ")).font(style(12.0, 500.0)).color(INK))
+    // A full-width strip along the bottom with the pill pushed right (no handlers, so the map
+    // under it still pans).
+    row().key("status").absolute(12.0, s.vp[1] - 40.0).w((s.vp[0] - 24.0).max(0.0)).h(28.0)
+        .child(el().grow(1.0))
+        .child(row().h(28.0).px(10.0).align(rune::Align::Center).radius(6.0).fill(PANEL).border(1.0, PANEL_EDGE)
+            .child(text(parts.join("   ·   ")).font(style(12.0, 500.0)).color(INK).single_line()))
 }

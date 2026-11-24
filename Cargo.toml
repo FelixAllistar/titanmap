@@ -29,6 +29,8 @@ windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse",
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+# Browsers without WebGPU fall back to WebGL2.
+rune = { git = "https://github.com/anomalyco/rune", rev = "02042d8", default-features = false, features = ["embedded-fonts", "svg", "webgl"] }
 
 [workspace]
 members = [".", "datagen"]
