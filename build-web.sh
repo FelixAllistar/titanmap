@@ -35,8 +35,6 @@ done
 rm -rf "$out/assets/icons"
 cp -r assets/icons "$out/assets/icons"
 # Tiles and icons rarely change: let browsers and Cloudflare cache them for a day.
-printf '/assets/*
-  Cache-Control: public, max-age=86400
-' > "$out/_headers"
+printf '/assets/*\n  Cache-Control: public, max-age=86400\n' > "$out/_headers"
 [[ -n $shim ]] && rm -rf "$shim"
 echo "built $out — serve it with: python -m http.server 8000 -d $out"

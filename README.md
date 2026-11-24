@@ -35,12 +35,11 @@ Set `watch_key` to `""` to turn off watching the map key.
 python -m http.server 8000 -d web-dist
 ```
 
-Live at https://titanmap.adam-mccallister21.workers.dev (Cloudflare Workers static assets,
-free plan). To publish a new build:
+Live at https://titanmap.pages.dev (Cloudflare Pages, free plan). To publish a new build:
 
 ```bash
 ./build-web.sh
-npx wrangler deploy     # uses wrangler.jsonc; needs `npx wrangler login` once
+npx wrangler pages deploy --branch main   # uses wrangler.jsonc; needs `npx wrangler login` once
 ```
 
 ## Map data

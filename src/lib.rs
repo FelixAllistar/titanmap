@@ -390,8 +390,9 @@ fn map_canvas(s: &State) -> El {
         })
         .on_wheel(|s: &mut State, e: WheelEvent, tx| {
             tx.instant();
-            // Scroll always zooms, toward the pointer (dragging pans).
-            let f = (-e.dy * 0.0035).exp().clamp(0.5, 2.0);
+            // Scroll always zooms, toward the pointer (dragging pans). Rune's wheel dy is
+            // positive for scrolling up, which zooms in.
+            let f = (e.dy * 0.0035).exp().clamp(0.5, 2.0);
             s.zoom_about([e.x, e.y], f);
             true
         })
