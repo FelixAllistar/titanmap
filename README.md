@@ -23,7 +23,7 @@ The game must be in **borderless windowed** (or windowed) mode for any overlay t
 Settings are written to `titanmap.json` next to the executable on first run:
 
 ```json
-{ "toggle": "alt+m", "watch_key": "M", "watch_delay_ms": 450, "min_score": 0.45 }
+{ "toggle": "alt+m", "watch_key": "M", "watch_delay_ms": 450, "min_score": 0.55 }
 ```
 
 Set `watch_key` to `""` to turn off watching the map key.

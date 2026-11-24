@@ -8,7 +8,6 @@
 //! level of the map. The player is where the in-game marker is: found by its blue-and-white
 //! dot, else the centre of the view (the game's "Focus Player").
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -28,11 +27,6 @@ impl Gray {
         Gray { w: img.width() as usize, h: img.height() as usize, px: img.as_raw().iter().map(|&v| v as f32 / 255.0).collect() }
     }
 
-    fn crop(&self, x0: usize, y0: usize, w: usize, h: usize) -> Gray {
-        let mut px = Vec::with_capacity(w * h);
-        for y in y0..y0 + h { px.extend_from_slice(&self.px[y * self.w + x0..y * self.w + x0 + w]); }
-        Gray { w, h, px }
-    }
 }
 
 fn luma(img: &RgbaImage) -> GrayImage { image::DynamicImage::ImageRgba8(img.clone()).to_luma8() }
@@ -73,9 +67,16 @@ impl Fft2 {
     }
 }
 
+/// In-place square transpose in 32x32 blocks (the naive loop thrashes the cache at n = 1024).
 fn transpose(buf: &mut [Complex32], n: usize) {
-    for y in 0..n {
-        for x in y + 1..n { buf.swap(y * n + x, x * n + y); }
+    const B: usize = 32;
+    for by in (0..n).step_by(B) {
+        for bx in (by..n).step_by(B) {
+            for y in by..(by + B).min(n) {
+                let start = if bx == by { y + 1 } else { bx };
+                for x in start..(bx + B).min(n) { buf.swap(y * n + x, x * n + y); }
+            }
+        }
     }
 }
 
@@ -193,7 +194,7 @@ pub struct MapIndex {
 impl MapIndex {
     pub fn build(assets: &Path, id: &str, full: (u32, u32), levels: u32) -> Option<MapIndex> {
         let top = levels - 1;
-        let coarse_z = 1.min(top);
+        let coarse_z = 0;
         let fine_z = 3.min(top);
         let coarse = load_level(assets, id, coarse_z)?;
         let fine = load_level(assets, id, fine_z)?;
@@ -276,87 +277,125 @@ impl Locator {
         Locator { maps: maps.iter().filter_map(|(id, full, levels)| MapIndex::build(assets, id, *full, *levels)).collect() }
     }
 
-    /// Locate a screenshot. `prefer` names the map to try first; others are only tried if it fails.
+    /// Locate a screenshot. Every map gets the coarse sweep (cheap); only the best map's top
+    /// candidates are refined. `prefer` wins ties within a small margin.
     pub fn locate(&self, shot: &RgbaImage, prefer: Option<&str>) -> Option<Fix> {
         let t0 = std::time::Instant::now();
+        let dbg = std::env::var_os("TITANMAP_DEBUG").is_some();
         let area = map_area(shot);
         let crop = image::imageops::crop_imm(shot, area.0, area.1, area.2, area.3).to_image();
-        let gray = luma(&crop);
-        let mut order: Vec<&MapIndex> = self.maps.iter().collect();
-        if let Some(p) = prefer { order.sort_by_key(|m| !m.id.eq_ignore_ascii_case(p)); }
-        let mut best: Option<Fix> = None;
-        for m in order {
-            if let Some(mut fix) = self.locate_on(m, &gray, area) {
-                let marker = find_marker(shot, area);
-                // Marker -> image px through the fitted transform; else the view's centre.
-                let q = marker.unwrap_or([area.0 as f32 + area.2 as f32 / 2.0, area.1 as f32 + area.3 as f32 / 2.0]);
-                fix.at = [fix.at[0] + (q[0] - area.0 as f32) / fix.zoom, fix.at[1] + (q[1] - area.1 as f32) / fix.zoom];
-                fix.marker = marker;
-                let good = fix.score > 0.55;
-                if best.as_ref().map(|b| fix.score > b.score).unwrap_or(true) { best = Some(fix); }
-                if good { break; }
-            }
+        let src = Source::new(luma(&crop));
+        let mut sweeps: Vec<(f32, &MapIndex, Vec<Cand>)> = self.maps.iter().map(|m| {
+            let c = coarse(m, &src);
+            let bonus = if prefer.map(|p| m.id.eq_ignore_ascii_case(p)).unwrap_or(false) { 0.03 } else { 0.0 };
+            (c.first().map(|c| c.0).unwrap_or(-1.0) + bonus, m, c)
+        }).collect();
+        sweeps.sort_by(|a, b| b.0.total_cmp(&a.0));
+        if dbg {
+            for (sc, m, _) in &sweeps { eprintln!("  coarse {}: {sc:.3}", m.id); }
+            eprintln!("  coarse sweeps: {} ms", t0.elapsed().as_millis());
         }
-        best.map(|mut b| { b.millis = t0.elapsed().as_millis(); b })
+        let (_, m, cands) = sweeps.into_iter().next()?;
+        let mut fix = refine(m, &src, &cands)?;
+        if dbg { eprintln!("  refined: {} ms", t0.elapsed().as_millis()); }
+        let marker = find_marker(shot, area);
+        // Marker -> image px through the fitted transform; else the view's centre.
+        let q = marker.unwrap_or([area.0 as f32 + area.2 as f32 / 2.0, area.1 as f32 + area.3 as f32 / 2.0]);
+        fix.at = [fix.at[0] + (q[0] - area.0 as f32) / fix.zoom, fix.at[1] + (q[1] - area.1 as f32) / fix.zoom];
+        fix.marker = marker;
+        fix.millis = t0.elapsed().as_millis();
+        Some(fix)
+    }
+}
+
+/// (score, coarse px per shot px, u, v)
+type Cand = (f32, f32, usize, usize);
+
+/// The cropped screenshot with halvings, so each rescale starts from a nearby size.
+struct Source {
+    levels: Vec<GrayImage>,
+}
+
+impl Source {
+    fn new(img: GrayImage) -> Source {
+        let mut levels = vec![img];
+        while levels.last().unwrap().width() > 64 {
+            let l = levels.last().unwrap();
+            let next = resize(l, l.width() / 2, l.height() / 2);
+            levels.push(next);
+        }
+        Source { levels }
     }
 
-    /// Returns a Fix whose `at` is the image position of the crop's top-left corner.
-    fn locate_on(&self, m: &MapIndex, gray: &GrayImage, _area: (u32, u32, u32, u32)) -> Option<Fix> {
-        let (cw, ch) = gray.dimensions();
-        let base = &m.coarse;
-        // Sweep: f = coarse px per screenshot px. The crop must fit inside the coarse map.
-        let fmax = (base.img.w as f32 * 0.98 / cw as f32).min(base.img.h as f32 * 0.98 / ch as f32);
-        let fmin = (24.0 / cw.min(ch) as f32).max(fmax / 40.0);
-        let mut cands: Vec<(f32, f32, usize, usize)> = Vec::new(); // score, f, u, v
-        let mut f = fmax;
-        let mut scaled: HashMap<u32, Gray> = HashMap::new();
-        while f >= fmin {
-            let t = Gray::from_luma(&resize(gray, (cw as f32 * f).round() as u32, (ch as f32 * f).round() as u32));
-            for (s, u, v) in base.search(&t, 2) { cands.push((s, f, u, v)); }
-            scaled.insert(f.to_bits(), t);
-            f /= 1.07;
-        }
-        cands.sort_by(|a, b| b.0.total_cmp(&a.0));
-        cands.truncate(3);
+    fn dims(&self) -> (u32, u32) { self.levels[0].dimensions() }
 
-        // Refine each candidate on the fine level: search a window around it at nearby scales.
-        let mut best: Option<(f32, f32, f32, f32)> = None; // score, fine px per shot px, x, y (fine px of crop origin)
-        for &(_, f, u, v) in &cands {
-            let k = m.fine_scale / m.coarse_scale; // fine px per coarse px
-            let g = f * k; // fine px per shot px
-            let (tw, th) = (cw as f32 * g, ch as f32 * g);
-            let margin = (tw.max(th) * 0.25).max(48.0);
-            let x0 = (u as f32 * k - margin).max(0.0) as u32;
-            let y0 = (v as f32 * k - margin).max(0.0) as u32;
-            let x1 = ((u as f32 * k + tw + margin) as u32).min(m.fine.width());
-            let y1 = ((v as f32 * k + th + margin) as u32).min(m.fine.height());
-            if x1 <= x0 + 16 || y1 <= y0 + 16 { continue; }
-            // Keep the FFT small: downsample the window if it is big.
-            let ds = (1024.0 / (x1 - x0).max(y1 - y0) as f32).min(1.0);
-            let win = image::imageops::crop_imm(&m.fine, x0, y0, x1 - x0, y1 - y0).to_image();
-            let win = if ds < 1.0 { resize(&win, ((x1 - x0) as f32 * ds) as u32, ((y1 - y0) as f32 * ds) as u32) } else { win };
-            let sw = Searchable::new(Gray::from_luma(&win));
-            for step in -3..=3 {
-                let gg = g * 1.025f32.powi(step) * ds;
-                let t = Gray::from_luma(&resize(gray, (cw as f32 * gg).round() as u32, (ch as f32 * gg).round() as u32));
-                for (s, uu, vv) in sw.search(&t, 1) {
-                    if best.map(|b| s > b.0).unwrap_or(true) {
-                        best = Some((s, gg / ds, x0 as f32 + uu as f32 / ds, y0 as f32 + vv as f32 / ds));
-                    }
-                }
-            }
-        }
-        let (score, g, x, y) = best?;
-        let zoom = g / m.fine_scale; // shot px per full-res px... inverted below
-        // g = fine px per shot px; full px per shot px = g / fine_scale.
-        let full_per_shot = zoom;
-        Some(Fix {
-            map: m.id.clone(),
-            score,
-            at: [x / m.fine_scale, y / m.fine_scale],
-            zoom: 1.0 / full_per_shot,
-            marker: None,
-            millis: 0,
-        })
+    /// The screenshot scaled by `f`.
+    fn scaled(&self, f: f32) -> Gray {
+        let (w, h) = self.dims();
+        let (tw, th) = ((w as f32 * f).round().max(1.0) as u32, (h as f32 * f).round().max(1.0) as u32);
+        let from = self.levels.iter().rev().find(|l| l.width() >= tw).unwrap_or(&self.levels[0]);
+        Gray::from_luma(&resize(from, tw, th))
     }
+}
+
+/// Run `f` over `items` on every core.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Vec<R> + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    std::thread::scope(|sc| {
+        let f = &f;
+        let jobs: Vec<_> = (0..threads).map(|k| sc.spawn(move || {
+            items.iter().skip(k).step_by(threads).flat_map(f).collect::<Vec<R>>()
+        })).collect();
+        jobs.into_iter().flat_map(|j| j.join().unwrap()).collect()
+    })
+}
+
+/// Sweep scales on the coarse map; best candidates first.
+fn coarse(m: &MapIndex, src: &Source) -> Vec<Cand> {
+    let (cw, ch) = src.dims();
+    let base = &m.coarse;
+    let fmax = (base.img.w as f32 * 0.98 / cw as f32).min(base.img.h as f32 * 0.98 / ch as f32);
+    let fmin = (20.0 / cw.min(ch) as f32).max(fmax / 25.0);
+    let mut scales = Vec::new();
+    let mut f = fmax;
+    while f >= fmin { scales.push(f); f /= 1.09; }
+    let mut cands = par_map(&scales, |&f| base.search(&src.scaled(f), 2).into_iter().map(|(s, u, v)| (s, f, u, v)).collect());
+    cands.sort_by(|a, b| b.0.total_cmp(&a.0));
+    cands.truncate(4);
+    cands
+}
+
+/// Refine the strongest coarse candidates on the fine level. Returns a Fix whose `at` is the
+/// image position of the crop's top-left corner.
+fn refine(m: &MapIndex, src: &Source, cands: &[Cand]) -> Option<Fix> {
+    let (cw, ch) = src.dims();
+    let top = cands.first()?.0;
+    let k = m.fine_scale / m.coarse_scale; // fine px per coarse px
+    // (window origin, downsample, searchable window, fine px per shot px)
+    let wins: Vec<(u32, u32, f32, Searchable, f32)> = cands.iter().filter(|c| c.0 > top - 0.12).take(2).filter_map(|&(_, f, u, v)| {
+        let g = f * k;
+        let (tw, th) = (cw as f32 * g, ch as f32 * g);
+        let margin = (tw.max(th) * 0.2).max(40.0);
+        let x0 = (u as f32 * k - margin).max(0.0) as u32;
+        let y0 = (v as f32 * k - margin).max(0.0) as u32;
+        let x1 = ((u as f32 * k + tw + margin) as u32).min(m.fine.width());
+        let y1 = ((v as f32 * k + th + margin) as u32).min(m.fine.height());
+        if x1 <= x0 + 16 || y1 <= y0 + 16 { return None; }
+        // Keep each FFT at 512: downsample big windows.
+        let ds = (500.0 / (x1 - x0).max(y1 - y0) as f32).min(1.0);
+        let win = image::imageops::crop_imm(&m.fine, x0, y0, x1 - x0, y1 - y0).to_image();
+        let win = if ds < 1.0 { resize(&win, ((x1 - x0) as f32 * ds) as u32, ((y1 - y0) as f32 * ds) as u32) } else { win };
+        Some((x0, y0, ds, Searchable::new(Gray::from_luma(&win)), g))
+    }).collect();
+    let jobs: Vec<(usize, i32)> = (0..wins.len()).flat_map(|w| (-3..=3).map(move |s| (w, s))).collect();
+    let results = par_map(&jobs, |&(w, step)| {
+        let (x0, y0, ds, sw, g) = &wins[w];
+        let gg = g * 1.03f32.powi(step) * ds;
+        sw.search(&src.scaled(gg), 1).into_iter()
+            .map(|(s, uu, vv)| (s, gg / ds, *x0 as f32 + uu as f32 / ds, *y0 as f32 + vv as f32 / ds))
+            .collect()
+    });
+    let (score, g, x, y) = results.into_iter().max_by(|a, b| a.0.total_cmp(&b.0))?;
+    // g = fine px per shot px, so shot px per full-res px = fine_scale / g.
+    Some(Fix { map: m.id.clone(), score, at: [x / m.fine_scale, y / m.fine_scale], zoom: m.fine_scale / g, marker: None, millis: 0 })
 }

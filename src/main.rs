@@ -34,7 +34,7 @@ struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { toggle: "alt+m".into(), watch_key: "M".into(), watch_delay_ms: 450, min_score: 0.45 }
+        Config { toggle: "alt+m".into(), watch_key: "M".into(), watch_delay_ms: 450, min_score: 0.55 }
     }
 }
 

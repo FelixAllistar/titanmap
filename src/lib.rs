@@ -377,7 +377,7 @@ fn map_canvas(s: &State) -> El {
     let top = m.image.levels - 1;
     let tile = m.image.tile as f32;
     let (z, want) = s.wanted_tiles();
-    let mut draw_tile = |canvas: El, z: u32, x: u32, y: u32| -> El {
+    let draw_tile = |canvas: El, z: u32, x: u32, y: u32| -> El {
         let Some(img) = s.tiles.get(&(s.cur, z, x, y)) else { return canvas };
         let inv = 2f32.powi(top as i32 - z as i32); // image px per level px
         let x0 = x as f32 * tile * inv;
