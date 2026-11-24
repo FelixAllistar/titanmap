@@ -1,0 +1,9 @@
+// Cloudflare Workers static-assets site for the web build. Build first (./build-web.sh),
+// then deploy with: npx wrangler deploy
+{
+  "name": "titanmap",
+  "compatibility_date": "2026-11-23",
+  "assets": {
+    "directory": "./web-dist"
+  }
+}
