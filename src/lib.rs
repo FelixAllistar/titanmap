@@ -86,6 +86,8 @@ pub struct State {
     hover: Option<usize>,
     pointer: Option<[f32; 2]>,
     drag_from: [f32; 2],
+    /// How many requested tiles had decoded at the last poll: a change re-runs the view.
+    ready_tiles: usize,
     pub player: Option<Player>,
     /// One line at the bottom: locate results and errors.
     pub status: String,
@@ -114,6 +116,7 @@ impl State {
             hover: None,
             pointer: None,
             drag_from: [0.0, 0.0],
+            ready_tiles: 0,
             player: None,
             status: String::new(),
             locate: None,
@@ -274,9 +277,12 @@ pub fn setup(s: &mut State, waker: Waker) {
 }
 
 pub fn poll(s: &mut State, _clock: f64, _tx: &mut Tx) -> bool {
-    let before = s.tiles.len();
     s.ensure_tiles();
-    s.tiles.len() != before
+    // Tiles decode in the background; redraw when one lands, not only when one is requested.
+    let ready = s.tiles.values().filter(|t| t.is_ready()).count();
+    let changed = ready != s.ready_tiles;
+    s.ready_tiles = ready;
+    changed
 }
 
 pub fn on_key(s: &mut State, e: &KeyEvent, _tx: &mut Tx) -> bool {
@@ -336,20 +342,25 @@ fn map_canvas(s: &State) -> El {
     let m = s.map();
     let cam = s.cam();
     let mut canvas = el().key("map").w_full().h_full().clip_soft(0.0)
+        // The camera is direct manipulation: tiles, labels and outlines must land in the same
+        // frame, never on springs (which made the image trail the vector overlay).
+        .instant_changes()
         .on_layout(|s: &mut State, r| {
             if (s.vp[0] - r[2]).abs() > 0.5 || (s.vp[1] - r[3]).abs() > 0.5 {
                 s.vp = [r[2], r[3]];
                 s.ensure_tiles();
             }
         })
-        .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| {
+        .on_drag(|s: &mut State, d: &mut Drag, tx: &mut Tx| {
+            tx.instant();
             if d.phase == Phase::Down { s.drag_from = s.cam().c; }
             let cam = s.cam();
             let c = [s.drag_from[0] - d.dx / cam.zoom, s.drag_from[1] - d.dy / cam.zoom];
             s.set_cam(Cam { c, zoom: cam.zoom });
             s.hover = None;
         })
-        .on_wheel(|s: &mut State, e: WheelEvent, _tx| {
+        .on_wheel(|s: &mut State, e: WheelEvent, tx| {
+            tx.instant();
             if e.precise && !e.mods.ctrl {
                 // Trackpad: two-finger scroll pans.
                 let cam = s.cam();
@@ -360,7 +371,8 @@ fn map_canvas(s: &State) -> El {
             }
             true
         })
-        .on_magnify(|s: &mut State, e: MagnifyEvent, _tx| {
+        .on_magnify(|s: &mut State, e: MagnifyEvent, tx| {
+            tx.instant();
             s.zoom_about([e.x, e.y], 1.0 + e.delta);
             true
         })
@@ -378,7 +390,7 @@ fn map_canvas(s: &State) -> El {
     let tile = m.image.tile as f32;
     let (z, want) = s.wanted_tiles();
     let draw_tile = |canvas: El, z: u32, x: u32, y: u32| -> El {
-        let Some(img) = s.tiles.get(&(s.cur, z, x, y)) else { return canvas };
+        let Some(img) = s.tiles.get(&(s.cur, z, x, y)).filter(|t| t.is_ready()) else { return canvas };
         let inv = 2f32.powi(top as i32 - z as i32); // image px per level px
         let x0 = x as f32 * tile * inv;
         let y0 = y as f32 * tile * inv;
@@ -390,7 +402,20 @@ fn map_canvas(s: &State) -> El {
         let (ax, ay) = (a[0].floor(), a[1].floor());
         canvas.child(el().key(format!("t{}_{z}_{x}_{y}", s.cur)).absolute(ax, ay).size(b[0].ceil() - ax, b[1].ceil() - ay).pixels(img.pixels()))
     };
-    canvas = draw_tile(canvas, 0, 0, 0);
+    let ready = |z: u32, x: u32, y: u32| s.tiles.get(&(s.cur, z, x, y)).is_some_and(|t| t.is_ready());
+    // Where a tile of this level is still loading, show the nearest coarser one already in memory.
+    let mut fallback: Vec<(u32, u32, u32)> = Vec::new();
+    let mut need_overview = false;
+    for &(x, y) in &want {
+        if ready(z, x, y) { continue; }
+        match (1..=z).map(|d| (z - d, x >> d, y >> d)).find(|&(pz, px, py)| pz > 0 && ready(pz, px, py)) {
+            Some(t) => if !fallback.contains(&t) { fallback.push(t) },
+            None => need_overview = true,
+        }
+    }
+    if z == 0 || need_overview { canvas = draw_tile(canvas, 0, 0, 0); }
+    fallback.sort();
+    for &(fz, fx, fy) in &fallback { canvas = draw_tile(canvas, fz, fx, fy); }
     if z > 0 { for &(x, y) in &want { canvas = draw_tile(canvas, z, x, y); } }
 
     canvas = canvas.child(el().key("vectors").absolute(0.0, 0.0).size(s.vp[0], s.vp[1]).shape(vectors(s, cam)));
