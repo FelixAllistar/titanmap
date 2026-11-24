@@ -106,7 +106,7 @@ impl State {
             cur: 0,
             cams: vec![None; n],
             vp: [1280.0, 800.0],
-            layers: [Layer::HomeCave, Layer::WayStone, Layer::Locations, Layer::Areas, Layer::Water, Layer::Caves].into_iter().collect(),
+            layers: [Layer::HomeCave, Layer::WayStone, Layer::Locations, Layer::Caves].into_iter().collect(),
             items: HashSet::new(),
             expanded: HashSet::new(),
             panel: true,
@@ -444,8 +444,8 @@ fn vectors(s: &State, cam: Cam) -> Shape {
     for it in &m.items {
         if !s.item_visible(it) { continue; }
         let (color, width) = match it.layer {
-            Layer::Areas => (srgba(1.0, 0.95, 0.8, 0.55), 1.5),
-            Layer::Water => (srgba(0.45, 0.78, 1.0, 0.6), 1.25),
+            Layer::Areas => (srgba(1.0, 0.95, 0.8, 0.35), 1.0),
+            Layer::Water => (srgba(0.45, 0.78, 1.0, 0.4), 1.0),
             Layer::Caves => (srgba(1.0, 0.62, 0.3, 0.9), (0.9 * ppu).clamp(1.5, 4.0)),
             Layer::Cliffs => (srgba(0.85, 0.85, 0.85, 0.7), 1.5),
             _ => continue,
