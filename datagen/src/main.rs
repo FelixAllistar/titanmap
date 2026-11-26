@@ -92,6 +92,9 @@ fn build_icons(root: &Path, cache: &Path, out: &Path) {
             if f["kind"] == "pt" { if let Some(c) = f["class"].as_str() { classes.insert(c.to_string()); } }
         }
     }
+    // Location and water names get Vulnona's pin and droplet markers.
+    classes.insert("Locations".into());
+    classes.insert("Water".into());
     icons::build(root, cache, &classes);
 }
 

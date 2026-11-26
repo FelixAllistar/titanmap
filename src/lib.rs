@@ -247,6 +247,8 @@ impl State {
         let mut want: Vec<&str> = self.items.iter().map(String::as_str).collect();
         if self.layers.contains(&Layer::HomeCave) { want.push("HomeCave"); }
         if self.layers.contains(&Layer::WayStone) { want.push("WayStone"); }
+        if self.layers.contains(&Layer::Locations) { want.push("Locations"); }
+        if self.layers.contains(&Layer::Water) { want.push("Water"); }
         for c in want {
             if self.icon_set.contains(c) && !self.icons.contains_key(c) {
                 let img = cache.file(format!("{}/icons/{c}.png", self.assets), 0.0, 1.0);
@@ -556,6 +558,15 @@ fn markers(s: &State, cam: Cam) -> Vec<El> {
     let m = s.map();
     let items = icons_fit(s, cam);
     let mut out = Vec::new();
+    // Pins for named locations and droplets for named water, under everything else.
+    for (i, it) in m.items.iter().enumerate() {
+        if it.f.kind != "txt" || !matches!(it.layer, Layer::Locations | Layer::Water) || !s.item_visible(it) { continue; }
+        let Some(img) = s.icon(if it.layer == Layer::Water { "Water" } else { "Locations" }) else { continue };
+        let c = s.to_screen(cam, it.at);
+        let sz = POI_ICON;
+        if !on_view(s, c, sz) { continue; }
+        out.push(el().key(format!("m{i}")).absolute(c[0] - sz / 2.0, c[1] - sz / 2.0).size(sz, sz).pixels(img.pixels()));
+    }
     for pass in 0..2 {
         for (i, it) in m.items.iter().enumerate() {
             let top = matches!(it.layer, Layer::HomeCave | Layer::WayStone);
@@ -571,29 +582,53 @@ fn markers(s: &State, cam: Cam) -> Vec<El> {
     out
 }
 
+/// Pin and droplet size for location and water names.
+const POI_ICON: f32 = 18.0;
+
+/// Place names at every zoom. Higher-priority names go first (home caves and waystones, then
+/// areas, locations, water) and any name that would overlap one already placed is skipped, so
+/// the fit view stays readable and more names appear as you zoom in.
 fn labels(s: &State, cam: Cam) -> Vec<El> {
     let m = s.map();
-    let span = m.image.w as f32 * cam.zoom; // how wide the whole map is on screen
-    let mut out = Vec::new();
+    let mut cands = Vec::new();
     for (i, it) in m.items.iter().enumerate() {
         if !s.item_visible(it) { continue; }
-        let (st, color, min_span) = match (it.f.kind.as_str(), it.layer) {
-            ("txt", Layer::Areas) => (style(12.5, 650.0), rgb(0xfff4dc), 300.0),
-            ("txt", Layer::Water) => (style(11.0, 500.0), rgb(0x9fd8ff), 1100.0),
-            ("txt", Layer::Locations) => (style(11.0, 600.0), rgb(0xffd77a), 1800.0),
-            ("txt", _) => (style(11.0, 500.0), INK, 2200.0),
-            ("pt", Layer::HomeCave | Layer::WayStone) if !it.f.name.is_empty() => (style(11.0, 600.0), INK, 1400.0),
+        let (prio, size, weight, color, below) = match (it.f.kind.as_str(), it.layer) {
+            ("pt", Layer::HomeCave | Layer::WayStone) if !it.f.name.is_empty() => (0, 11.5, 650.0, INK, 15.0),
+            ("txt", Layer::Areas) => (1, 12.5, 650.0, rgb(0xfff4dc), 0.0),
+            ("txt", Layer::Locations) => (2, 11.0, 600.0, rgb(0xffd77a), POI_ICON / 2.0 + 1.0),
+            ("txt", Layer::Water) => (3, 11.0, 550.0, rgb(0x9fd8ff), POI_ICON / 2.0 + 1.0),
             _ => continue,
         };
-        if span < min_span { continue; }
         let c = s.to_screen(cam, it.at);
-        if c[0] < -100.0 || c[1] < -40.0 || c[0] > s.vp[0] + 100.0 || c[1] > s.vp[1] + 40.0 { continue; }
-        let is_point = it.f.kind == "pt";
-        let name = if is_point { it.f.name.clone() } else { it.f.name.replace('★', "").trim().to_string() };
-        let y = if is_point { c[1] + 14.0 } else { c[1] - 9.0 };
+        if !on_view(s, c, 60.0) { continue; }
+        let raw = it.f.name.replace('★', "").split_whitespace().collect::<Vec<_>>().join(" ");
+        let raw = raw.trim();
+        if raw.is_empty() { continue; }
+        // "BigQuillLake" -> "Big Quill Lake".
+        let name = if raw.contains(' ') { raw.to_string() } else { pretty(raw) };
+        cands.push((prio, i, c, name, size, weight, color, below));
+    }
+    cands.sort_by_key(|c| (c.0, c.1));
+    let mut placed: Vec<[f32; 4]> = Vec::new();
+    // The data often names one spot twice ("WildernessPeakPond" and "Wilderness Peak Pond"):
+    // keep only the first of the same name nearby.
+    let mut named: Vec<(String, [f32; 2])> = Vec::new();
+    let mut out = Vec::new();
+    for (_, i, c, name, size, weight, color, below) in cands {
+        let norm: String = name.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase).collect();
+        if named.iter().any(|(n, p)| *n == norm && (p[0] - c[0]).hypot(p[1] - c[1]) < 250.0) { continue; }
+        named.push((norm, c));
+        let w = name.chars().count() as f32 * size * 0.56 + 10.0;
+        let h = size + 6.0;
+        let y = if below > 0.0 { c[1] + below } else { c[1] - h / 2.0 };
+        let r = [c[0] - w / 2.0, y, c[0] + w / 2.0, y + h];
+        if placed.iter().any(|p| r[0] < p[2] + 2.0 && p[0] < r[2] + 2.0 && r[1] < p[3] + 1.0 && p[1] < r[3] + 1.0) { continue; }
+        placed.push(r);
         out.push(
-            el().key(format!("l{i}")).absolute(c[0] - 110.0, y).w(220.0).center()
-                .child(el().px(4.0).radius(4.0).fill(srgba(0.0, 0.0, 0.0, 0.45)).child(text(name).font(st).color(color))),
+            el().key(format!("l{i}")).absolute(c[0] - 120.0, y).w(240.0).center()
+                .child(el().px(4.0).radius(4.0).fill(srgba(0.0, 0.0, 0.0, 0.5))
+                    .child(text(name).font(style(size, weight)).color(color).single_line())),
         );
     }
     out
@@ -778,7 +813,7 @@ fn search_hits(s: &State) -> Vec<Found> {
     }
     let mut seen = HashSet::new();
     for (i, it) in m.items.iter().enumerate() {
-        let name = it.f.name.replace('★', "").trim().to_string();
+        let name = it.f.name.replace('★', "").split_whitespace().collect::<Vec<_>>().join(" ");
         if name.is_empty() || !matches!(it.layer, Layer::HomeCave | Layer::WayStone | Layer::Areas | Layer::Locations | Layer::Water | Layer::Caves) { continue; }
         let kind = match it.layer {
             Layer::HomeCave => if it.underwater { "Home cave (underwater)" } else { "Home cave" },

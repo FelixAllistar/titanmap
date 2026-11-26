@@ -207,6 +207,27 @@ impl MapData {
             let lines = f.paths.iter().map(|p| p.iter().map(|&q| px(q)).collect()).collect();
             items.push(Item { layer, cat, ty, underwater, f, at, lines });
         }
+        // Some maps (Panjura's water) name their areas only on the outline shapes, which aren't
+        // drawn: give each named shape a text label at its centre instead.
+        for layer in [Layer::Areas, Layer::Water] {
+            if items.iter().any(|it| it.layer == layer && it.f.kind == "txt") { continue; }
+            let mut seen = std::collections::HashSet::new();
+            let extra: Vec<Item> = items.iter()
+                .filter(|it| it.layer == layer && matches!(it.f.kind.as_str(), "ell" | "line") && !it.f.name.is_empty())
+                .filter(|it| seen.insert(it.f.name.clone()))
+                .map(|it| {
+                    let pts: Vec<[f32; 2]> = it.lines.iter().flatten().copied().collect();
+                    let at = if it.f.kind == "ell" || pts.is_empty() { it.at } else {
+                        let n = pts.len() as f32;
+                        [pts.iter().map(|p| p[0]).sum::<f32>() / n, pts.iter().map(|p| p[1]).sum::<f32>() / n]
+                    };
+                    let f = Feature { kind: "txt".into(), layer: it.f.layer.clone(), sub: String::new(), class: it.f.class.clone(),
+                        name: it.f.name.clone(), opt: String::new(), p: None, paths: Vec::new(), r: None, rot: 0.0, note: String::new() };
+                    Item { layer, cat: 0, ty: 0, underwater: false, f, at, lines: Vec::new() }
+                })
+                .collect();
+            items.extend(extra);
+        }
         for c in &mut categories { c.types.sort_by(|a, b| a.0.cmp(&b.0)); }
         // Re-resolve type indices after sorting.
         for it in &mut items {
